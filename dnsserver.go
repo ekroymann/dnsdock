@@ -8,9 +8,47 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"strconv"
 
 	"github.com/miekg/dns"
 )
+
+type SrvAlias struct {
+	SrvName string
+	Priority uint16
+	Weight uint16
+	Port uint16
+	Target string
+}
+
+func NewSrvAlias(compact string) *SrvAlias {
+	items := strings.Split(compact, ":")
+	if len(items) < 5 {
+		return nil
+	}
+	var prio uint64
+	var weight uint64
+	var port uint64
+	var err error
+	if prio, err = strconv.ParseUint(items[1], 10, 16); err != nil {
+		return nil
+	}
+	if weight, err = strconv.ParseUint(items[2], 10, 16); err != nil {
+		return nil
+	}
+	if port, err = strconv.ParseUint(items[3], 10, 16); err != nil {
+		return nil
+	}
+	target := items[4]
+	if target[len(target) -1 ] != '.' {
+		target = target + "."
+	}
+	return &SrvAlias{SrvName: items[0], Priority: uint16(prio), Weight: uint16(weight), Port: uint16(port), Target: target}
+}
+
+func (a *SrvAlias) String() string {
+	return a.SrvName
+}
 
 type Service struct {
 	Name    string
@@ -18,6 +56,7 @@ type Service struct {
 	Ip      net.IP
 	Ttl     int
 	Aliases []string
+	SrvAliases []*SrvAlias
 }
 
 func NewService() (s *Service) {
@@ -74,6 +113,10 @@ func (s *DNSServer) AddService(id string, service Service) {
 
 	for _, alias := range service.Aliases {
 		s.mux.HandleFunc(alias+".", s.handleRequest)
+	}
+
+	for _, alias := range service.SrvAliases {
+		s.mux.HandleFunc(alias.SrvName+".", s.handleRequest)
 	}
 
 	if s.config.verbose {
@@ -190,6 +233,31 @@ func (s *DNSServer) makeServiceA(n string, service *Service) dns.RR {
 	return rr
 }
 
+func (s *DNSServer) makeServiceSRV(n string, service *Service, alias *SrvAlias) dns.RR {
+	rr := new(dns.SRV)
+
+	var ttl int
+	if service.Ttl != -1 {
+		ttl = service.Ttl
+	} else {
+		ttl = s.config.ttl
+	}
+
+	rr.Hdr = dns.RR_Header{
+		Name:   n,
+		Rrtype: dns.TypeSRV,
+		Class:  dns.ClassINET,
+		Ttl:    uint32(ttl),
+	}
+
+	rr.Priority = alias.Priority
+	rr.Weight = alias.Weight
+	rr.Port = alias.Port
+	rr.Target = alias.Target
+
+	return rr
+}
+
 func (s *DNSServer) makeServiceMX(n string, service *Service) dns.RR {
 	rr := new(dns.MX)
 
@@ -238,23 +306,31 @@ func (s *DNSServer) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 		query = query[:len(query)-1]
 	}
 
-	for service := range s.queryServices(query) {
-		var rr dns.RR
-		switch r.Question[0].Qtype {
-		case dns.TypeA:
-			rr = s.makeServiceA(r.Question[0].Name, service)
-		case dns.TypeMX:
-			rr = s.makeServiceMX(r.Question[0].Name, service)
-		default:
-			// this query type isn't supported, but we do have
-			// a record with this name. Per RFC 4074 sec. 3, we
-			// immediately return an empty NOERROR reply.
-			m.Ns = s.createSOA()
-			w.WriteMsg(m)
-			return
+	if r.Question[0].Qtype == dns.TypeSRV {
+		for sa := range s.queryServicesSRV(query) {
+			var rr dns.RR
+			rr = s.makeServiceSRV(r.Question[0].Name, sa.service, sa.alias)
+			m.Answer = append(m.Answer, rr)
 		}
-
-		m.Answer = append(m.Answer, rr)
+	} else {
+		for service := range s.queryServices(query) {
+			var rr dns.RR
+			switch r.Question[0].Qtype {
+			case dns.TypeA:
+				rr = s.makeServiceA(r.Question[0].Name, service)
+				m.Answer = append(m.Answer, rr)
+			case dns.TypeMX:
+				rr = s.makeServiceMX(r.Question[0].Name, service)
+				m.Answer = append(m.Answer, rr)
+			default:
+				// this query type isn't supported, but we do have
+				// a record with this name. Per RFC 4074 sec. 3, we
+				// immediately return an empty NOERROR reply.
+				m.Ns = s.createSOA()
+				w.WriteMsg(m)
+				return
+			}
+		}
 	}
 
 	// We didn't find a record corresponding to the query
@@ -263,7 +339,9 @@ func (s *DNSServer) handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 		m.SetRcode(r, dns.RcodeNameError) // NXDOMAIN
 	}
 
-	w.WriteMsg(m)
+	if err := w.WriteMsg(m); err != nil {
+		log.Printf("test: %s", err)
+	}
 }
 
 func (s *DNSServer) handleReverseRequest(w dns.ResponseWriter, r *dns.Msg) {
@@ -374,6 +452,38 @@ func (s *DNSServer) queryServices(query string) chan *Service {
 			for _, alias := range service.Aliases {
 				if isPrefixQuery(query, strings.Split(alias, ".")) {
 					c <- service
+				}
+			}
+		}
+
+		close(c)
+
+	}()
+
+	return c
+
+}
+
+type serviceAlias struct {
+	service *Service
+	alias *SrvAlias
+}
+
+func (s *DNSServer) queryServicesSRV(query string) chan *serviceAlias {
+	c := make(chan *serviceAlias, 3)
+
+	go func() {
+		query := strings.Split(strings.ToLower(query), ".")
+
+		defer s.lock.RUnlock()
+		s.lock.RLock()
+
+		for _, service := range s.services {
+			// create the name for this service, skip empty strings
+
+			for _, alias := range service.SrvAliases {
+				if isPrefixQuery(query, strings.Split(alias.SrvName, ".")) {
+					c <- &serviceAlias{service, alias}
 				}
 			}
 		}

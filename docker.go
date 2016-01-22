@@ -151,6 +151,14 @@ func overrideFromEnv(in *Service, env map[string]string) (out *Service) {
 			in.Aliases = strings.Split(v, ",")
 		}
 
+		if k == "DNSDOCK_SRV_ALIAS" {
+			for _, compact := range strings.Split(v, ",") {
+				if a := NewSrvAlias(compact); a != nil {
+					in.SrvAliases = append(in.SrvAliases, a)
+				}
+			}
+		}
+
 		if k == "DNSDOCK_NAME" {
 			in.Name = v
 		}
