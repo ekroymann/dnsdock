@@ -454,7 +454,7 @@ func (s *DNSServer) queryServices(query string) chan *Service {
 				test2 = append(test2, service.HostName)
 				test2 = append(test2, s.config.domain...)
 				if isPrefixQuery(query, test2) {
-					c -> service
+					c <- service
 				}
 			}
 
