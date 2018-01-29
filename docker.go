@@ -163,6 +163,10 @@ func overrideFromEnv(in *Service, env map[string]string) (out *Service) {
 			in.Name = v
 		}
 
+		if k == "HOSTNAME" {
+			in.HostName = v
+		}
+
 		if k == "SERVICE_TAGS" {
 			if len(v) == 0 {
 				in.Name = ""

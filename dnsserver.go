@@ -52,6 +52,7 @@ func (a *SrvAlias) String() string {
 
 type Service struct {
 	Name    string
+	HostName string
 	Image   string
 	Ip      net.IP
 	Ttl     int
@@ -446,6 +447,15 @@ func (s *DNSServer) queryServices(query string) chan *Service {
 
 			if isPrefixQuery(query, test) {
 				c <- service
+			}
+
+			if len(service.HostName) > 0 {
+				test2 := []string{}
+				test2 = append(test2, service.HostName)
+				test2 = append(test2, s.config.domain...)
+				if isPrefixQuery(query, test2) {
+					c -> service
+				}
 			}
 
 			// check aliases
